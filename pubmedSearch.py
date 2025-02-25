@@ -51,30 +51,26 @@ class Tools:
             default="https://example.com/search",
             description="The base URL for Search Engine",
         )
-        # SEARCH_ENGINE: str = Field(
-        #     default="pubmed",
-        #     description="searxng文献搜索引擎",
-        # )
         PAGES_NO: int = Field(
             default=3,
-            description="检索搜索文献数量",
+            description="检索搜索文献数量/the number of literature searched",
         )
         PAGE_CONTENT_WORDS_LIMIT: int = Field(
             default=2000,
-            description="网页内容截断长度",
+            description="网页内容截断长度/Web Content Truncation Length",
         )
         SUMMARY: bool = Field(
             default=False,
-            description="启用API总结网页，可以使AI阅读更多文献",
+            description="启用API总结网页，可以使AI阅读更多文献/Enabling API summarization pages enables AI to read more literature",
         )
         API_URL: str = Field(
             default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            description="网页总结API，默认阿里百炼",
+            description="网页总结API，默认阿里百炼/Web Summary API, Default Ali",
         )
         API_KEY: str = Field(default="", description="API密钥")
         API_MODEL: str = Field(
             default="qwen-long",
-            description="API请求的模型名称，默认为 qwen-long",
+            description="API请求的模型名称，默认为 qwen-long/Model name of the API request, default is qwen-long",
         )
 
     async def modify_query(self, query: str) -> str:
@@ -111,22 +107,22 @@ class Tools:
 
         if self.valves.SEARXNG_URL == "https://example.com/search":
             await emitter.update_status(
-                "请设置SEARXNG搜索地址！", True, "web_search", []
+                "请设置SEARXNG搜索地址！/Please set the SEARXNG search address!", True, "web_search", []
             )
-            raise ValueError("请设置SEARXNG搜索地址！")
+            raise ValueError("请设置SEARXNG搜索地址！/Please set the SEARXNG search address!")
 
         if self.valves.SUMMARY and self.valves.API_KEY == "":
-            await emitter.update_status("请填写API KEY！", True, "web_search", [])
-            raise ValueError("请填写API KEY！")
+            await emitter.update_status("请填写API KEY！/Please fill in the API KEY!", True, "web_search", [])
+            raise ValueError("请填写API KEY！/Please fill in the API KEY!")
 
         await emitter.update_status(
-            f"正在优化搜索关键词: {query}", False, "web_search", []
+            f"正在优化搜索关键词/Optimize Search Keywords: {query}", False, "web_search", []
         )
 
         query = await self.modify_query(query)
 
         await emitter.update_status(
-            f"正在pubmed搜索: {query}相关文献", False, "web_search", []
+            f"正在pubmed搜索/Searching: {query}", False, "web_search", []
         )
         encoded_query = quote("!pub " + query)
         search_url = f"{self.valves.SEARXNG_URL}?q={encoded_query}&format=json&categories=science"
@@ -139,11 +135,11 @@ class Tools:
             nlit = min(self.valves.PAGES_NO, len(urls))
             if not urls:
                 await emitter.update_status(
-                    "搜索未返回任何结果", True, "web_search", []
+                    "搜索未返回任何结果/Search returned no results", True, "web_search", []
                 )
-                return "搜索未返回任何结果"
+                return "搜索未返回任何结果/Search returned no results"
             await emitter.update_status(
-                f"搜索完成,正在读取前 {nlit} 个结果",
+                f"搜索完成,正在读取 {nlit} 结果/ Done, Reading {nlit} results",
                 False,
                 "web_search",
                 urls,
@@ -153,10 +149,10 @@ class Tools:
             )
 
             # 构建最终返回的字符串
-            final_result = f"用户查询: {query}\n用户原始请求: {user_request}\n\n搜索结果及网页内容:\n{scraped_content}"
+            final_result = f"User query about: {query}\nOriginal request: {user_request}\n\nwebsite searching result:\n{scraped_content}"
 
             await emitter.update_status(
-                f"搜索阅读 {nlit} 文献完毕，正在总结",
+                f"搜索阅读 {nlit} 文献完毕，正在总结/Searching Done, Generating",
                 True,
                 "web_search",
                 urls[:nlit],
@@ -165,7 +161,7 @@ class Tools:
             return final_result
 
         except aiohttp.ClientError as e:
-            error_message = f"搜索时发生错误: {str(e)}"
+            error_message = f"搜索时发生错误/Error: {str(e)}"
             await emitter.update_status(error_message, True, "web_search", [])
             return error_message
 
@@ -189,14 +185,14 @@ class Tools:
 
         if self.valves.SUMMARY:
             await emitter.update_status(
-                f"{self.valves.API_MODEL} 正在仔细阅读 {len(urls)} 个网页, 请稍等",
+                f"{self.valves.API_MODEL} 正在仔细阅读 {len(urls)} 个网页, 请稍等/Reading pages, Please wait",
                 False,
                 "web_search",
                 urls,
             )
         else:
             await emitter.update_status(
-                f"正在获取 {len(urls)} 个网页, 请稍等",
+                f"正在获取 {len(urls)} 个网页, 请稍等/Reading pages, Please wait",
                 False,
                 "web_search",
                 urls,
@@ -244,7 +240,7 @@ class Tools:
                 return f"# Title: {title if len(title) else url}\n# URL: {url}\n# Content: {content}\n"
 
             except aiohttp.ClientError as e:
-                error_message = f"读取网页 {url} 时出错: {str(e)}"
+                error_message = f"读取网页 {url} 时出错/ Error: {str(e)}"
                 await emitter.update_status(error_message, False, "web_scrape", [url])
                 return (
                     f"# Read Failed!\n# URL: {url}\n # Error Message: {error_message}\n"
@@ -255,10 +251,9 @@ class Tools:
         combined_results.extend(results)
 
         await emitter.update_status(
-            f"已完成 {len(urls)} 个网页的读取", True, "web_search", urls
+            f"已完成 {len(urls)} 个网页的读取/Reading Done", True, "web_search", urls
         )
 
-        # 将所有结果合并为一个字符串
         return "\n".join(
             [
                 " ".join(
