@@ -1,87 +1,131 @@
 """
 title: DeepSeek R1 with searxng search
 author: zyman
-author_url: https://github.com/wenz1xv/openWebUI-Tools/
-description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (version 0.5.6 or higher)
-version: 0.1.0  
-licence: MIT 
+author_url: https://github.com/wenz1xv/openWebUI-Tools
+description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (fix formular and image)
+version: 0.2.1
+licence: MIT  
 """
 
+import base64
 import json
 import httpx
 import re
-from typing import AsyncGenerator, Callable, Awaitable, Any
-from pydantic import BaseModel, Field
-import asyncio
-from typing import List, Union, Generator, Iterator
-import requests
-from bs4 import BeautifulSoup
-import urllib.parse
 import os
-from requests import get
-import concurrent.futures
-from urllib.parse import urlparse, urljoin
+import asyncio
+import requests
 import unicodedata
+import concurrent.futures
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from pydantic import BaseModel, Field
+from typing import AsyncGenerator, Callable, Awaitable, Any
+from typing import List, Union, Generator, Iterator, Optional, Dict
 
 
-def _parse_response(response):
+class SearchTool:
+    def __init__(self):
+        pass
 
-    if "data" in response:
-        data = response["data"]
-        if "webPages" in data:
-            webPages = data["webPages"]
-            if "value" in webPages:
-                result = [
-                    {
-                        "id": item.get("id", ""),
-                        "name": item.get("name", ""),
-                        "url": item.get("url", ""),
-                        "snippet": item.get("snippet", ""),
-                        "summary": item.get("summary", ""),
-                        "siteName": item.get("siteName", ""),
-                        "siteIcon": item.get("siteIcon", ""),
-                        "datePublished": item.get("datePublished", "")
-                        or item.get("dateLastCrawled", ""),
-                    }
-                    for item in webPages["value"]
-                ]
-    return result
+    def get_base_url(self, url):
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        return base_url
+
+    def generate_excerpt(self, content, max_length=200):
+        return content[:max_length] + "..." if len(content) > max_length else content
+
+    def format_text(self, original_text):
+        soup = BeautifulSoup(original_text, "html.parser")
+        formatted_text = soup.get_text(separator=" ", strip=True)
+        formatted_text = unicodedata.normalize("NFKC", formatted_text)
+        formatted_text = re.sub(r"\s+", " ", formatted_text)
+        formatted_text = formatted_text.strip()
+        formatted_text = self.remove_emojis(formatted_text)
+        return formatted_text
+
+    def remove_emojis(self, text):
+        return "".join(c for c in text if not unicodedata.category(c).startswith("So"))
+
+    def process_search_result(self, result, valves):
+        title_site = self.remove_emojis(result["title"])
+        url_site = result["url"]
+        snippet = result.get("content", "")
+
+        try:
+            response_site = requests.get(url_site, timeout=20)
+            if response_site.headers.get("Content-Type", "").find("pdf") > -1:
+                print(f"{url_site} is pdf")
+                return None
+            response_site.raise_for_status()
+            html_content = response_site.text
+
+            soup = BeautifulSoup(html_content, "html.parser")
+            content_site = self.format_text(soup.get_text(separator=" ", strip=True))
+
+            truncated_content = self.truncate_to_n_words(
+                content_site, valves.PAGE_CONTENT_WORDS_LIMIT
+            )
+            return {
+                "title": title_site,
+                "url": url_site,
+                "content": truncated_content,
+                "snippet": self.remove_emojis(snippet),
+            }
+
+        except requests.exceptions.RequestException as e:
+            return None
+
+    def truncate_to_n_words(self, text, token_limit):
+        tokens = text.split()
+        truncated_tokens = tokens[:token_limit]
+        return " ".join(truncated_tokens)
 
 
 class Pipe:
     class Valves(BaseModel):
         DEEPSEEK_API_BASE_URL: str = Field(
             default="https://api.deepseek.com/v1",
-            description="API的基础请求地址",
+            description="DeepSeek API的基础请求地址",
         )
-        DEEPSEEK_API_KEY: str = Field(default="", description="API密钥，可从控制台获取")
+        DEEPSEEK_API_KEY: str = Field(
+            default="", description="用于身份验证的DeepSeek API密钥，可从控制台获取"
+        )
         DEEPSEEK_API_MODEL: str = Field(
-            default="deepseek-r1",
-            description="API请求的模型名称，默认为 deepseek-r1",
+            default="deepseek-reasoner",
+            description="API请求的模型名称，默认为 deepseek-reasoner",
+        )
+        ENABLE_SEARCH: bool = Field(
+            default=False,
+            description="If True, using Searxng Search Engine",
         )
         SEARXNG_ENGINE_API_BASE_URL: str = Field(
             default="https://example.com/search",
-            description="Searxng地址",
-        )
-        IGNORED_WEBSITES: str = Field(
-            default="",
-            description="忽略的搜索网站",
+            description="The base URL for Search Engine",
         )
         RETURNED_SCRAPPED_PAGES_NO: int = Field(
             default=3,
-            description="处理的网页数量",
+            description="The number of Search Engine Results to Parse",
         )
         SCRAPPED_PAGES_NO: int = Field(
             default=5,
-            description="搜索的网页数量",
+            description="Total pages scapped. Ideally greater than one of the returned pages",
         )
         PAGE_CONTENT_WORDS_LIMIT: int = Field(
             default=5000,
-            description="网页内容长度限制",
+            description="Limit words content for each page.",
         )
         CITATION_LINKS: bool = Field(
             default=False,
-            description="是否在回答中引用网页",
+            description="If True, send custom citations with links",
+        )
+        IMAGE_BASE_URL: str = Field(
+            default="",
+            description="Easyimage图床url",
+        )
+        IMAGE_BASE_KEY: str = Field(
+            default="",
+            description="Easyimage图床key",
         )
 
     def __init__(self):
@@ -89,9 +133,10 @@ class Pipe:
         self.data_prefix = "data:"
         self.emitter = None
         self.type = "manifold"
-        self.id = "engine_search"
-        self.name = "engines/"
+        self.id = "deep_search"
+        self.name = "deepsearch/"
         self.search_result = ""
+        self.MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
     def pipes(self):
         return [
@@ -101,21 +146,42 @@ class Pipe:
             }
         ]
 
+    def process_image(self, image_data):
+        """Process image data with size validation."""
+        try:
+            url = ""
+            if image_data["image_url"]["url"].startswith("data:image"):
+                mime_type, base64_data = image_data["image_url"]["url"].split(",", 1)
+                response = requests.post(
+                    self.valves.IMAGE_BASE_URL,
+                    data={"token": self.valves.IMAGE_BASE_KEY},
+                    files={"image": base64.b64decode(base64_data)},
+                )
+                if response.status_code == 200:
+                    url = response.json()["url"]
+                else:
+                    raise ValueError(f"Image upload failed for {response.text}")
+            else:
+                url = image_data["image_url"]["url"]
+
+            return {"type": "image_url", "image_url": url}
+        except Exception as e:
+            return {
+                "type": "text",
+                "text": f"I send you a Image but Image upload failed because {e}, remind me the error.",
+            }
+
     async def pipe(
         self,
         body: dict,
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
         results=None,
     ) -> AsyncGenerator[str, None]:
-        """主处理管道（已移除缓冲）"""
-        user_input = self._extract_user_input(body)
-
-        if not user_input:
-            yield json.dumps({"error": "No search query provided"}, ensure_ascii=False)
+        # model = body.get("model", '')    # for debug
+        # print(f"Received model: {model}")    # for debug
+        if not self.valves.DEEPSEEK_API_KEY:
+            yield json.dumps({"error": "未配置API密钥"}, ensure_ascii=False)
             return
-
-        model = body.get("model", "")
-        print(f"Received model: {model}")  # Debug print
 
         if isinstance(results, str):
             try:
@@ -126,65 +192,88 @@ class Pipe:
                     ensure_ascii=False,
                 )
                 return
-
-        search_results = self._search_searxng(user_input, results)
-        urls = "\n".join([result["url"] for result in search_results])
-        yield f"""
-        <details>
-            <summary>正在阅读 {user_input} 搜索结果 </summary>
-            {urls}
-        </details>
-        """
-        await asyncio.sleep(0.1)
-        self.search_result = await self._get_result(search_results)
-
-        thinking_state = {"thinking": -1}  # 使用字典来存储thinking状态
+        thinking_state = {"thinking": -1}  # thinking status
         self.emitter = __event_emitter__
 
-        # 验证配置
-        if not self.valves.DEEPSEEK_API_KEY:
-            yield json.dumps({"error": "未配置API密钥"}, ensure_ascii=False)
+        messages = body.get("messages", [])
+        if messages:
+            last_message = messages[-1]
+            if isinstance(last_message.get("content"), list):
+                is_text = True
+                user_input = ""
+                for item in last_message["content"]:
+                    if item["type"] == "text":
+                        user_input = item["text"]
+                    else:
+                        is_text = False
+            else:
+                is_text = True
+                user_input = last_message.get("content", "")
+        else:
+            yield json.dumps({"error": "No input provided"}, ensure_ascii=False)
             return
+        # print("User input: ", user_input) # for debug
+        if self.valves.ENABLE_SEARCH and is_text:
+            search_results = self._search_searxng(user_input, results)
+            urls = "\n".join([result["url"] for result in search_results])
+            yield f"""
+            <details>
+                <summary>Search for: {user_input} </summary>
+                {urls}
+            </details>
+            """
+            await asyncio.sleep(0.1)
+            self.search_result = await self._get_result(search_results)
+            # 合并搜索结果和用户输入
+            result = [
+                {
+                    "type": "text",
+                    "text": f"Web Search Results you got: {self.search_result}\n\nUser Input: {user_input}",
+                }
+            ]
+            messages[-1] = {"role": "user", "content": result}
+        processed_messages = []
+        for message in messages:
+            processed_content = []
+            if isinstance(message.get("content"), list):
+                for item in message["content"]:
+                    if item["type"] == "text":
+                        processed_content.append({"type": "text", "text": item["text"]})
+                    elif item["type"] == "image_url":
+                        processed_image = self.process_image(item)
+                        processed_content.append(processed_image)
+            else:
+                processed_content = [
+                    {"type": "text", "text": message.get("content", "")}
+                ]
+            processed_messages.append(
+                {"role": message["role"], "content": processed_content}
+            )
 
-        # 获取用户输入
-        messages = body["messages"]
-        user_input = messages[-1]["content"]
+        # yield json.dumps(processed_messages, ensure_ascii=False) # for debug
 
-        # 合并搜索结果和用户输入
-        combined_input = (
-            f"Search Results: {self.search_result}\n\nUser Input: {user_input}"
-        )
-        # 准备请求参数
+        # avoid consecutive messages from the same role
+        i = 0
+        while i < len(processed_messages) - 1:
+            if processed_messages[i]["role"] == processed_messages[i + 1]["role"]:
+                alternate_role = (
+                    "assistant" if processed_messages[i]["role"] == "user" else "user"
+                )
+                processed_messages.insert(
+                    i + 1,
+                    {"role": alternate_role, "content": "[Unfinished thinking]"},
+                )
+            i += 1
         headers = {
             "Authorization": f"Bearer {self.valves.DEEPSEEK_API_KEY}",
             "Content-Type": "application/json",
         }
-
         try:
-            # 模型ID提取
             model_id = body["model"].split(".", 1)[-1]
             payload = {**body, "model": model_id}
+            payload["messages"] = processed_messages
 
-            # 将合并后的输入替换掉原来的用户输入部分
-            payload["messages"] = [{"role": "user", "content": combined_input}]
-            # 处理消息以防止连续的相同角色
-            messages = payload["messages"]
-            i = 0
-            while i < len(messages) - 1:
-                if messages[i]["role"] == messages[i + 1]["role"]:
-                    # 插入具有替代角色的占位符消息
-                    alternate_role = (
-                        "assistant" if messages[i]["role"] == "user" else "user"
-                    )
-                    messages.insert(
-                        i + 1,
-                        {"role": alternate_role, "content": "[Unfinished thinking]"},
-                    )
-                i += 1
-
-            # yield json.dumps(payload, ensure_ascii=False)
-
-            # 发起API请求
+            # get the response from the DeepSeek API
             async with httpx.AsyncClient(http2=True) as client:
                 async with client.stream(
                     "POST",
@@ -193,13 +282,12 @@ class Pipe:
                     headers=headers,
                     timeout=300,
                 ) as response:
-                    # 错误处理
                     if response.status_code != 200:
                         error = await response.aread()
                         yield self._format_error(response.status_code, error)
                         return
 
-                    # 流式处理响应
+                    #
                     async for line in response.aiter_lines():
                         if not line.startswith(self.data_prefix):
                             continue
@@ -252,26 +340,14 @@ class Pipe:
                                     yield "</think>"
                                     await asyncio.sleep(0.1)
                                     yield "\n"
-                            yield content
+                            yield re.sub(r"\)", r") ", content)
 
         except Exception as e:
             yield self._format_exception(e)
 
-    def _extract_user_input(self, body: dict) -> str:
-        messages = body.get("messages", [])
-        if messages:
-            last_message = messages[-1]
-            if isinstance(last_message.get("content"), list):
-                for item in last_message["content"]:
-                    if item["type"] == "text":
-                        return item["text"]
-            else:
-                return last_message.get("content", "")
-        return ""
-
     def _search_searxng(self, query: str, results=None) -> str:
         search_engine_url = self.valves.SEARXNG_ENGINE_API_BASE_URL
-        # Ensure RETURNED_SCRAPPED_PAGES_NO does not exceed SCRAPPED_PAGES_NO
+        # This is to prevent the search engine from returning more results than the total scrapped pages
         if self.valves.RETURNED_SCRAPPED_PAGES_NO > self.valves.SCRAPPED_PAGES_NO:
             self.valves.RETURNED_SCRAPPED_PAGES_NO = self.valves.SCRAPPED_PAGES_NO
         params = {
@@ -283,7 +359,7 @@ class Pipe:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
         }
         try:
-            print("Sending request to search engine")
+            # print("Sending request to search engine") # for debug
             resp = requests.get(
                 search_engine_url, params=params, headers=headers, timeout=120
             )
@@ -291,22 +367,20 @@ class Pipe:
             data = resp.json()
             results = data.get("results", [])
             limited_results = results[: self.valves.SCRAPPED_PAGES_NO]
-            print(f"Retrieved {len(limited_results)} search results")
+            # print(f"Retrieved {len(limited_results)} search results") # for debug
         except requests.exceptions.RequestException as e:
-            print(f"Error during search: {str(e)}")
+            # print(f"Error during search: {str(e)}") # for debug
             return f"An error occurred while searching searxng: {str(e)}"
         return limited_results
 
     async def _get_result(self, limited_results: list) -> str:
-        functions = HelpFunctions()
+        searchai = SearchTool()
         results_json = []
         if limited_results:
             print(f"Processing search results")
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 futures = [
-                    executor.submit(
-                        functions.process_search_result, result, self.valves
-                    )
+                    executor.submit(searchai.process_search_result, result, self.valves)
                     for result in limited_results
                 ]
                 for future in concurrent.futures.as_completed(futures):
@@ -371,72 +445,3 @@ class Pipe:
         """异常格式化保持不变"""
         err_type = type(e).__name__
         return json.dumps({"error": f"{err_type}: {str(e)}"}, ensure_ascii=False)
-
-
-class HelpFunctions:
-    def __init__(self):
-        pass
-
-    def get_base_url(self, url):
-        parsed_url = urlparse(url)
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        return base_url
-
-    def generate_excerpt(self, content, max_length=200):
-        return content[:max_length] + "..." if len(content) > max_length else content
-
-    def format_text(self, original_text):
-        soup = BeautifulSoup(original_text, "html.parser")
-        formatted_text = soup.get_text(separator=" ", strip=True)
-        formatted_text = unicodedata.normalize("NFKC", formatted_text)
-        formatted_text = re.sub(r"\s+", " ", formatted_text)
-        formatted_text = formatted_text.strip()
-        formatted_text = self.remove_emojis(formatted_text)
-        return formatted_text
-
-    def remove_emojis(self, text):
-        return "".join(c for c in text if not unicodedata.category(c).startswith("So"))
-
-    def process_search_result(self, result, valves):
-        title_site = self.remove_emojis(result["title"])
-        url_site = result["url"]
-        snippet = result.get("content", "")
-
-        # Check if the website is in the ignored list, but only if IGNORED_WEBSITES is not empty
-        if valves.IGNORED_WEBSITES:
-            base_url = self.get_base_url(url_site)
-            if any(
-                ignored_site.strip() in base_url
-                for ignored_site in valves.IGNORED_WEBSITES.split(",")
-            ):
-                return None
-
-        try:
-            response_site = requests.get(url_site, timeout=20)
-            if response_site.headers.get("Content-Type", "").find("pdf") > -1:
-                print(f"{url_site} is pdf")
-                return None
-            response_site.raise_for_status()
-            html_content = response_site.text
-
-            soup = BeautifulSoup(html_content, "html.parser")
-            content_site = self.format_text(soup.get_text(separator=" ", strip=True))
-
-            truncated_content = self.truncate_to_n_words(
-                content_site, valves.PAGE_CONTENT_WORDS_LIMIT
-            )
-
-            return {
-                "title": title_site,
-                "url": url_site,
-                "content": truncated_content,
-                "snippet": self.remove_emojis(snippet),
-            }
-
-        except requests.exceptions.RequestException as e:
-            return None
-
-    def truncate_to_n_words(self, text, token_limit):
-        tokens = text.split()
-        truncated_tokens = tokens[:token_limit]
-        return " ".join(truncated_tokens)
