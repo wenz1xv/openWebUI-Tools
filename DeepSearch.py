@@ -3,7 +3,7 @@ title: DeepSeek R1 with searxng search
 author: zyman
 author_url: https://github.com/wenz1xv/openWebUI-Tools
 description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (fix formular display)
-version: 0.3.1
+version: 0.3.3
 licence: MIT  
 """
 
@@ -51,11 +51,14 @@ class SearchTool:
         title_site = self.remove_emojis(result["title"])
         url_site = result["url"]
         snippet = result.get("content", "")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+        }
 
         try:
-            response_site = requests.get(url_site, timeout=20)
+            response_site = requests.get(url_site, headers=headers, timeout=20)
             if response_site.headers.get("Content-Type", "").find("pdf") > -1:
-                return f"{url_site} is pdf file and been passed"
+                return {"error": f"{url_site} is pdf file and been passed"}
             response_site.raise_for_status()
             html_content = response_site.text
 
@@ -73,7 +76,9 @@ class SearchTool:
             }
 
         except requests.exceptions.RequestException as e:
-            return f"An error occurred while processing search {url_site}: {str(e)}"
+            return {
+                "error": f"An error occurred while processing search {url_site}: {str(e)}"
+            }
 
     def truncate_to_n_words(self, text, token_limit):
         tokens = text.split()
@@ -131,7 +136,6 @@ class Pipe:
         self.id = "deep_search"
         self.name = "deepsearch/"
         self.search_result = ""
-        self.MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
     def _is_enable_search(self, user_input: str) -> bool:
         query = f"""
@@ -391,6 +395,9 @@ class Pipe:
             results_json = results_json[: self.valves.RETURNED_SCRAPPED_PAGES_NO]
             formatted_results = "Searxng Search Results:\n\n"
             for i, result in enumerate(results_json):
+                if "error" in result:
+                    formatted_results += f"Website {i} Error: {result['error']}\n\n"
+                    continue
                 line = f'Website {i}: {result["title"]}\n{result["url"]}\n{result["content"]}\n{result["snippet"]}\n\n'
                 formatted_results += line
             return formatted_results
