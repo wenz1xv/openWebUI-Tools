@@ -3,7 +3,7 @@ title: DeepSeek R1 with searxng search
 author: zyman
 author_url: https://github.com/wenz1xv/openWebUI-Tools
 description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (fix formular display)
-version: 0.3.3
+version: 0.3.5.1
 licence: MIT  
 """
 
@@ -97,7 +97,7 @@ class Pipe:
         )
         DEEPSEEK_API_MODEL: str = Field(
             default="deepseek-reasoner",
-            description="API请求的模型名称，默认为 deepseek-reasoner",
+            description="API请求的模型名称，可多个模型，用,分割，默认为 deepseek-reasoner",
         )
         ENABLE_SEARCH: bool = Field(
             default=False,
@@ -127,6 +127,14 @@ class Pipe:
             default=False,
             description="If True, send custom citations with links",
         )
+
+    def _get_supported_models(self) -> list:
+        """获取支持的模型列表"""
+        return [
+            model.strip()
+            for model in self.valves.DEEPSEEK_API_MODEL.split(",")
+            if model.strip()
+        ]
 
     def __init__(self):
         self.valves = self.Valves()
@@ -179,11 +187,13 @@ class Pipe:
             return False
 
     def pipes(self):
+        # 每次调用时重新获取支持的模型列表
         return [
             {
-                "id": self.valves.DEEPSEEK_API_MODEL,
-                "name": self.valves.DEEPSEEK_API_MODEL,
+                "id": model_name,
+                "name": model_name,
             }
+            for model_name in self._get_supported_models()
         ]
 
     async def pipe(
@@ -196,6 +206,11 @@ class Pipe:
         # print(f"Received model: {model}")    # for debug
         if not self.valves.DEEPSEEK_API_KEY:
             yield json.dumps({"error": "未配置API密钥"}, ensure_ascii=False)
+            return
+
+        model_id = body["model"].split(".", 1)[-1]
+        if model_id not in self._get_supported_models():
+            yield json.dumps({"error": f"不支持的模型: {model_id}"}, ensure_ascii=False)
             return
 
         if isinstance(results, str):
@@ -268,7 +283,6 @@ class Pipe:
             "Content-Type": "application/json",
         }
         try:
-            model_id = body["model"].split(".", 1)[-1]
             payload = {**body, "model": model_id}
             payload["messages"] = messages
 
@@ -339,7 +353,9 @@ class Pipe:
                                     yield "</think>"
                                     await asyncio.sleep(0.1)
                                     yield "\n"
-                            yield re.sub(r"\)", r") ", content)
+                            content = re.sub(r"\)", r") ", content)
+                            content = re.sub(r"(\$+)", r" \1", content)
+                            yield content
 
         except Exception as e:
             yield self._format_exception(e)
