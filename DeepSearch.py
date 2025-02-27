@@ -2,8 +2,8 @@
 title: DeepSeek R1 with searxng search
 author: zyman
 author_url: https://github.com/wenz1xv/openWebUI-Tools
-description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (fix formular and image)
-version: 0.2.1
+description: In OpenWebUI, displays the thought chain of the DeepSeek R1 model and searxng searchs (fix formular display)
+version: 0.3.1
 licence: MIT  
 """
 
@@ -55,8 +55,7 @@ class SearchTool:
         try:
             response_site = requests.get(url_site, timeout=20)
             if response_site.headers.get("Content-Type", "").find("pdf") > -1:
-                print(f"{url_site} is pdf")
-                return None
+                return f"{url_site} is pdf file and been passed"
             response_site.raise_for_status()
             html_content = response_site.text
 
@@ -74,7 +73,7 @@ class SearchTool:
             }
 
         except requests.exceptions.RequestException as e:
-            return None
+            return f"An error occurred while processing search {url_site}: {str(e)}"
 
     def truncate_to_n_words(self, text, token_limit):
         tokens = text.split()
@@ -99,6 +98,10 @@ class Pipe:
             default=False,
             description="If True, using Searxng Search Engine",
         )
+        SEARCH_JUDGE_MODEL: str = Field(
+            default="deepseek-chat",
+            description="用于判断是否启用联网搜索的模型，默认为 deepseek-chat",
+        )
         SEARXNG_ENGINE_API_BASE_URL: str = Field(
             default="https://example.com/search",
             description="The base URL for Search Engine",
@@ -119,14 +122,6 @@ class Pipe:
             default=False,
             description="If True, send custom citations with links",
         )
-        IMAGE_BASE_URL: str = Field(
-            default="",
-            description="Easyimage图床url",
-        )
-        IMAGE_BASE_KEY: str = Field(
-            default="",
-            description="Easyimage图床key",
-        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -138,6 +133,47 @@ class Pipe:
         self.search_result = ""
         self.MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
+    def _is_enable_search(self, user_input: str) -> bool:
+        query = f"""
+            # Strictly output one digit, 0 or 1.
+            Please judge according to the user input whether you need to network to check the information before outputting, if yes, output 1, otherwise output 0.
+            Caution:
+            - Prioritize networking in case of conflicting regulations;
+            - Assume that your knowledge base is all backward information;
+            - Networking is required for questions that require additional external information to answer;
+            - Networking is required for knowledge-based, literature-based, and legal-based questions;
+            - Networking is required for time-sensitive questions such as weather, news, real-time information, or questions that refer to temporal information such as [recently], [today], [this week], [this month], [what date], etc;
+            - Networking is not required if the user question is idle chatter, or if the question is not related to the content source, or if the question does not require additional information to help answer it;
+            # User input: {user_input}
+            """
+        message = [{"role": "user", "content": query}]
+        try:
+            url = f"{self.valves.DEEPSEEK_API_BASE_URL}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.valves.DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.valves.SEARCH_JUDGE_MODEL,
+                "stream": False,
+                "messages": message,
+            }
+
+            response = requests.request("POST", url, json=payload, headers=headers)
+            results = response.json()
+            if "content" in response.text:
+                return (
+                    True
+                    if results["choices"][-1]["message"]["content"] == "1"
+                    else False
+                )
+            else:
+                return True
+
+        except Exception as e:
+            print(f"报错: {str(e)}")
+            return False
+
     def pipes(self):
         return [
             {
@@ -145,31 +181,6 @@ class Pipe:
                 "name": self.valves.DEEPSEEK_API_MODEL,
             }
         ]
-
-    def process_image(self, image_data):
-        """Process image data with size validation."""
-        try:
-            url = ""
-            if image_data["image_url"]["url"].startswith("data:image"):
-                mime_type, base64_data = image_data["image_url"]["url"].split(",", 1)
-                response = requests.post(
-                    self.valves.IMAGE_BASE_URL,
-                    data={"token": self.valves.IMAGE_BASE_KEY},
-                    files={"image": base64.b64decode(base64_data)},
-                )
-                if response.status_code == 200:
-                    url = response.json()["url"]
-                else:
-                    raise ValueError(f"Image upload failed for {response.text}")
-            else:
-                url = image_data["image_url"]["url"]
-
-            return {"type": "image_url", "image_url": url}
-        except Exception as e:
-            return {
-                "type": "text",
-                "text": f"I send you a Image but Image upload failed because {e}, remind me the error.",
-            }
 
     async def pipe(
         self,
@@ -213,7 +224,10 @@ class Pipe:
             yield json.dumps({"error": "No input provided"}, ensure_ascii=False)
             return
         # print("User input: ", user_input) # for debug
-        if self.valves.ENABLE_SEARCH and is_text:
+        enable_search = False
+        if user_input and self.valves.ENABLE_SEARCH and is_text:
+            enable_search = self._is_enable_search(user_input)
+        if enable_search:
             search_results = self._search_searxng(user_input, results)
             urls = "\n".join([result["url"] for result in search_results])
             yield f"""
@@ -232,34 +246,15 @@ class Pipe:
                 }
             ]
             messages[-1] = {"role": "user", "content": result}
-        processed_messages = []
-        for message in messages:
-            processed_content = []
-            if isinstance(message.get("content"), list):
-                for item in message["content"]:
-                    if item["type"] == "text":
-                        processed_content.append({"type": "text", "text": item["text"]})
-                    elif item["type"] == "image_url":
-                        processed_image = self.process_image(item)
-                        processed_content.append(processed_image)
-            else:
-                processed_content = [
-                    {"type": "text", "text": message.get("content", "")}
-                ]
-            processed_messages.append(
-                {"role": message["role"], "content": processed_content}
-            )
-
-        # yield json.dumps(processed_messages, ensure_ascii=False) # for debug
 
         # avoid consecutive messages from the same role
         i = 0
-        while i < len(processed_messages) - 1:
-            if processed_messages[i]["role"] == processed_messages[i + 1]["role"]:
+        while i < len(messages) - 1:
+            if messages[i]["role"] == messages[i + 1]["role"]:
                 alternate_role = (
-                    "assistant" if processed_messages[i]["role"] == "user" else "user"
+                    "assistant" if messages[i]["role"] == "user" else "user"
                 )
-                processed_messages.insert(
+                messages.insert(
                     i + 1,
                     {"role": alternate_role, "content": "[Unfinished thinking]"},
                 )
@@ -271,7 +266,7 @@ class Pipe:
         try:
             model_id = body["model"].split(".", 1)[-1]
             payload = {**body, "model": model_id}
-            payload["messages"] = processed_messages
+            payload["messages"] = messages
 
             # get the response from the DeepSeek API
             async with httpx.AsyncClient(http2=True) as client:
